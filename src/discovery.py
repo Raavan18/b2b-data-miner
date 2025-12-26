@@ -11,7 +11,6 @@ from bs4 import BeautifulSoup
 
 from src.zenrows_client import fetch_page
 
-
 # Search query templates
 SEARCH_QUERIES = [
     'site:{domain} "contact us"',
@@ -19,222 +18,114 @@ SEARCH_QUERIES = [
     'site:{domain} "email"',
     'site:{domain} "phone"',
     'site:{domain} "about us"',
-    'site:{domain} "management committee"',
-    'site:{domain} "AMFI"',
-    '"Association of Mutual Funds in India" email',
-    '"Association of Mutual Funds in India" contact'
+    '"{company_name}" contact email',
+    '"{company_name}" registered office phone'
 ]
 
 # Relevance keywords for scoring
 CONTACT_KEYWORDS = {'contact', 'about', 'leadership', 'team', 'management', 'email', 'phone'}
 ROLE_KEYWORDS = {'pms', 'insurance agent', 'investment advisor', 'ifa', 'mutual fund', 'portfolio manager'}
 
-
 def generate_search_queries(domain: str, company_name: str = "") -> List[str]:
     """Generate search queries for a given domain and company name."""
     queries = []
     for template in SEARCH_QUERIES:
         if '{domain}' in template:
-            query = template.format(domain=domain)
+            if domain and '.' in domain:
+                query = template.format(domain=domain)
+            else:
+                continue # Skip domain queries if not valid
         elif '{company_name}' in template:
             if company_name:
                 query = template.format(company_name=company_name)
             else:
-                continue  # Skip company name queries if name not available
+                continue
         else:
             query = template
         queries.append(query)
     return queries
 
-
 def parse_google_results(html: str) -> List[Dict]:
-    """
-    Parse Google HTML search results.
-    Returns list of {url, snippet, title} dicts.
-    """
+    """Parse Google HTML search results using modern selectors."""
     soup = BeautifulSoup(html, 'html.parser')
     results = []
     
-    # Google result containers
-    result_divs = soup.find_all('div', class_=lambda x: x and ('g' in x.lower() or 'result' in x.lower()))
-    
-    for div in result_divs:
-        # Extract URL
-        link = div.find('a', href=True)
-        if not link:
-            continue
+    # Modern Google result container selector
+    for g in soup.select('div.g, div.MjjYud'):
+        link = g.select_one('a[href]')
+        title = g.select_one('h3')
+        snippet = g.select_one('div.VwiC3b, span.st')
         
-        url = link.get('href', '')
-        if not url.startswith('http'):
-            continue
-        
-        # Extract title
-        title_elem = div.find('h3') or div.find('a')
-        title = title_elem.get_text(strip=True) if title_elem else ''
-        
-        # Extract snippet
-        snippet_elem = div.find('span', class_=lambda x: x and ('st' in x.lower() or 'snippet' in x.lower()))
-        if not snippet_elem:
-            # Try alternative snippet locations
-            snippet_elem = div.find('div', class_=lambda x: x and ('s' in x.lower() or 'snippet' in x.lower()))
-        snippet = snippet_elem.get_text(strip=True) if snippet_elem else ''
-        
-        if url:
-            results.append({
-                'url': url,
-                'title': title,
-                'snippet': snippet,
-                'source': 'google'
-            })
-    
+        if link and title:
+            url = link['href']
+            if url.startswith('http') and 'google.com' not in url:
+                results.append({
+                    'url': url,
+                    'title': title.get_text(strip=True),
+                    'snippet': snippet.get_text(strip=True) if snippet else '',
+                    'source': 'google'
+                })
     return results
-
-
-def parse_duckduckgo_results(html: str) -> List[Dict]:
-    """
-    Parse DuckDuckGo HTML search results.
-    Returns list of {url, snippet, title} dicts.
-    """
-    soup = BeautifulSoup(html, 'html.parser')
-    results = []
-    
-    # DuckDuckGo result containers
-    result_divs = soup.find_all('div', class_=lambda x: x and ('result' in x.lower()))
-    
-    for div in result_divs:
-        # Extract URL
-        link = div.find('a', class_=lambda x: x and ('result__a' in x.lower() or 'result__url' in x.lower()))
-        if not link:
-            link = div.find('a', href=True)
-        
-        if not link:
-            continue
-        
-        url = link.get('href', '')
-        if not url.startswith('http'):
-            continue
-        
-        # Extract title
-        title = link.get_text(strip=True)
-        
-        # Extract snippet
-        snippet_elem = div.find('a', class_=lambda x: x and ('result__snippet' in x.lower()))
-        if not snippet_elem:
-            snippet_elem = div.find('div', class_=lambda x: x and ('snippet' in x.lower()))
-        snippet = snippet_elem.get_text(strip=True) if snippet_elem else ''
-        
-        if url:
-            results.append({
-                'url': url,
-                'title': title,
-                'snippet': snippet,
-                'source': 'duckduckgo'
-            })
-    
-    return results
-
 
 def score_url_candidate(candidate: Dict, target_domain: str) -> int:
-    """
-    Score a URL candidate based on relevance.
-    Returns score (0-100+).
-    Threshold to fetch: ≥ 40
-    """
+    """Score a URL candidate based on relevance and domain matching."""
     score = 0
     url = candidate.get('url', '').lower()
-    snippet = candidate.get('snippet', '').lower()
-    title = candidate.get('title', '').lower()
-    combined_text = f"{title} {snippet}".lower()
+    combined_text = f"{candidate.get('title', '')} {candidate.get('snippet', '')}".lower()
     
-    # Domain match is mandatory
-    parsed_url = urlparse(url)
-    candidate_domain = parsed_url.netloc.lower()
-    target_domain_clean = target_domain.lower().replace('www.', '')
-    candidate_domain_clean = candidate_domain.replace('www.', '')
+    # Loose Domain Check: Allow subdomains or similar matches
+    if target_domain:
+        clean_target = target_domain.lower().replace('www.', '')
+        if clean_target in url:
+            score += 50
     
-    if target_domain_clean not in candidate_domain_clean and candidate_domain_clean not in target_domain_clean:
-        return 0  # Reject if domain doesn't match
-    
-    # Contact/about/leadership keywords → +30
-    if any(keyword in combined_text for keyword in CONTACT_KEYWORDS):
-        score += 30
-    
-    # Mentions email or phone in snippet → +40
-    if 'email' in combined_text or 'phone' in combined_text or '@' in combined_text:
-        score += 40
-    
-    # Mentions role keywords → +40
-    if any(keyword in combined_text for keyword in ROLE_KEYWORDS):
-        score += 40
+    # Keywords match
+    if any(k in combined_text for k in CONTACT_KEYWORDS): score += 30
+    if '@' in combined_text or 'phone' in combined_text: score += 40
+    if any(k in combined_text for k in ROLE_KEYWORDS): score += 40
     
     return score
 
-
 async def search_google(session: aiohttp.ClientSession, query: str) -> List[Dict]:
-    """Search Google using ZenRows."""
-    # Google search URL (URL-encode query)
     encoded_query = quote_plus(query)
     search_url = f"https://www.google.com/search?q={encoded_query}&num=10"
-    
-    html = await fetch_page(session, search_url, js_render=False)
-    if not html:
-        return []
-    
-    results = parse_google_results(html)
-    return results
-
+    html = await fetch_page(session, search_url, js_render=True) # JS Render helps bypass simple bot checks
+    return parse_google_results(html) if html else []
 
 async def search_duckduckgo(session: aiohttp.ClientSession, query: str) -> List[Dict]:
-    """Search DuckDuckGo using ZenRows."""
-    # DuckDuckGo search URL (URL-encode query)
     encoded_query = quote_plus(query)
     search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
-    
     html = await fetch_page(session, search_url, js_render=False)
     if not html:
         return []
     
-    results = parse_duckduckgo_results(html)
+    soup = BeautifulSoup(html, 'html.parser')
+    results = []
+    for div in soup.find_all('div', class_='result'):
+        link = div.find('a', class_='result__a')
+        if link and link.get('href'):
+            results.append({
+                'url': link['href'],
+                'title': link.get_text(strip=True),
+                'snippet': div.find('a', class_='result__snippet').get_text(strip=True) if div.find('a', class_='result__snippet') else '',
+                'source': 'duckduckgo'
+            })
     return results
 
-
-async def discover_candidate_urls(
-    session: aiohttp.ClientSession,
-    domain: str,
-    company_name: str = ""
-) -> List[Dict]:
-    """
-    Discover candidate URLs using hybrid search.
-    Returns deduplicated list of candidates with scores.
-    """
+async def discover_candidate_urls(session: aiohttp.ClientSession, domain: str, company_name: str = "") -> List[Dict]:
     queries = generate_search_queries(domain, company_name)
     all_candidates = []
-    
-    # Search both engines
     for query in queries:
-        # Google search
-        google_results = await search_google(session, query)
-        all_candidates.extend(google_results)
-        
-        # DuckDuckGo search
-        ddg_results = await search_duckduckgo(session, query)
-        all_candidates.extend(ddg_results)
+        all_candidates.extend(await search_google(session, query))
+        all_candidates.extend(await search_duckduckgo(session, query))
     
-    # Deduplicate by URL
-    seen_urls: Set[str] = set()
+    seen_urls = set()
     deduplicated = []
+    for c in all_candidates:
+        if c['url'] not in seen_urls:
+            seen_urls.add(c['url'])
+            c['relevance_score'] = score_url_candidate(c, domain)
+            deduplicated.append(c)
     
-    for candidate in all_candidates:
-        url = candidate['url']
-        if url not in seen_urls:
-            seen_urls.add(url)
-            # Score the candidate
-            score = score_url_candidate(candidate, domain)
-            candidate['relevance_score'] = score
-            deduplicated.append(candidate)
-    
-    # Sort by score descending
     deduplicated.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-    
     return deduplicated
-

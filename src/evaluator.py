@@ -11,7 +11,7 @@ import re
 URL_FETCH_THRESHOLD = 40
 
 # Contact confidence threshold
-CONTACT_CONFIDENCE_THRESHOLD = 85
+CONTACT_CONFIDENCE_THRESHOLD = 50
 
 
 def validate_domain_match(url: str, target_domain: str) -> bool:
